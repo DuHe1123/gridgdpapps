@@ -13,10 +13,11 @@ import streamlit as st
 
 try:
     import folium
-    from branca.colormap import linear
+    from branca.colormap import LinearColormap, linear
     from streamlit_folium import st_folium
 except Exception:  # pragma: no cover - optional interactive map stack.
     folium = None
+    LinearColormap = None
     linear = None
     st_folium = None
 
@@ -424,19 +425,27 @@ def shapefile_feature_collection(resolution: str, df: pd.DataFrame, variable: st
 
 
 def make_folium_colormap(vmin: float, vmax: float):
-    for name in ("Viridis_09", "viridis", "YlGnBu_09", "YlOrRd_09"):
+    for name in ("YlOrRd_09", "YlOrRd_04", "OrRd_09", "YlGnBu_09"):
         candidate = getattr(linear, name, None)
         if candidate is not None:
             return candidate.scale(vmin, vmax)
-    return folium.LinearColormap(
-        colors=["#440154", "#31688e", "#35b779", "#fde725"],
+    return LinearColormap(
+        colors=["#fff7bc", "#fec44f", "#f03b20", "#7f0000"],
         vmin=vmin,
         vmax=vmax,
     )
 
 
+def grid_degree_size(resolution: str) -> float:
+    if resolution == "1 degree":
+        return 1.0
+    if resolution == "0.5 degree":
+        return 0.5
+    return 0.25
+
+
 def render_folium_grid_map(df: pd.DataFrame, state: GridState) -> None:
-    if folium is None or st_folium is None or linear is None:
+    if folium is None or st_folium is None or linear is None or LinearColormap is None:
         st.info("Interactive tile map packages are not installed yet, so a Plotly map is shown instead.")
         render_plotly_grid_map(df, state)
         return
@@ -459,7 +468,8 @@ def render_folium_grid_map(df: pd.DataFrame, state: GridState) -> None:
         vmin = float(map_df[color_col].min())
         vmax = float(map_df[color_col].max())
     cmap = make_folium_colormap(vmin, vmax)
-    cmap.caption = grid_variable_label(state.variable)
+    low_high = "Low to high"
+    cmap.caption = f"{grid_variable_label(state.variable)} ({low_high})"
 
     if state.use_polygons:
         geojson = shapefile_feature_collection(state.resolution, map_df, color_col, state.polygon_limit)
@@ -494,22 +504,24 @@ def render_folium_grid_map(df: pd.DataFrame, state: GridState) -> None:
             )
 
     if not state.use_polygons:
+        cell_size = grid_degree_size(state.resolution)
         for row in map_df.itertuples(index=False):
             value = getattr(row, color_col)
+            lon = float(getattr(row, "longitude"))
+            lat = float(getattr(row, "latitude"))
             popup = (
                 f"<b>{getattr(row, 'iso')}</b><br>"
                 f"Year: {getattr(row, 'year')}<br>"
                 f"{grid_variable_label(state.variable)}: {getattr(row, state.variable):,.4g}<br>"
                 f"Population: {getattr(row, 'pop_cell', float('nan')):,.0f}"
             )
-            folium.CircleMarker(
-                location=[getattr(row, "latitude"), getattr(row, "longitude")],
-                radius=3,
-                color=cmap(value),
+            folium.Rectangle(
+                bounds=[[lat, lon], [lat + cell_size, lon + cell_size]],
+                color="#1f2937",
+                weight=0.25,
                 fill=True,
                 fill_color=cmap(value),
-                fill_opacity=0.72,
-                weight=0,
+                fill_opacity=0.62,
                 popup=folium.Popup(popup, max_width=280),
             ).add_to(m)
 
@@ -1057,9 +1069,9 @@ def grid_sidebar() -> GridState:
     use_polygons = st.sidebar.checkbox(
         "Use shapefile polygons",
         value=False,
-        help="Best for filtered views or lower resolutions. If unavailable, the app falls back to point cells.",
+        help="Best for irregular boundary cells. If unavailable, the app draws regular grid rectangles from longitude/latitude.",
     )
-    map_rows = st.sidebar.slider("Point map cells", 500, 20000, 6000, step=500)
+    map_rows = st.sidebar.slider("Map cells", 500, 20000, 6000, step=500)
     polygon_limit = st.sidebar.slider("Polygon map cells", 250, 8000, 2500, step=250)
 
     return GridState(
@@ -1138,9 +1150,14 @@ def grid_overview_tab(df_all: pd.DataFrame, df_year: pd.DataFrame, state: GridSt
 
 
 def grid_distribution_tab(df_year: pd.DataFrame, state: GridState) -> None:
-    st.subheader("Distribution")
+    st.subheader("Describe variable")
     plot_df = df_year.dropna(subset=[state.variable]).copy()
     x_col = grid_color_column(state)
+    stats = plot_df[state.variable].describe(percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]).to_frame("value")
+    stats.loc["missing"] = df_year[state.variable].isna().sum()
+    stats.loc["zeros"] = (df_year[state.variable] == 0).sum()
+    st.dataframe(stats.round(5), use_container_width=True)
+
     fig = px.histogram(
         plot_df,
         x=x_col,
@@ -1151,11 +1168,15 @@ def grid_distribution_tab(df_year: pd.DataFrame, state: GridState) -> None:
     fig.update_layout(height=430, margin=dict(l=10, r=10, t=20, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
+
+def grid_by_group_tab(df_year: pd.DataFrame, state: GridState) -> None:
     st.subheader("Country aggregation")
+    group_options = [col for col in ["iso", "method", "is_cell_censored", "cell_size"] if col in df_year.columns]
+    group_col = st.selectbox("Group by", group_options, index=0)
     agg = (
-        df_year.groupby("iso", as_index=False)
+        df_year.groupby(group_col, as_index=False)
         .agg(
-            cells=("iso", "size"),
+            cells=(group_col, "size"),
             total_value=(state.variable, "sum"),
             mean_value=(state.variable, "mean"),
             median_value=(state.variable, "median"),
@@ -1165,17 +1186,73 @@ def grid_distribution_tab(df_year: pd.DataFrame, state: GridState) -> None:
     )
     left, right = st.columns([1, 1])
     with left:
+        plot_agg = agg.head(40)
         fig = px.bar(
-            agg.head(30),
+            plot_agg,
             x="total_value",
-            y="iso",
+            y=group_col,
             orientation="h",
-            labels={"total_value": f"Total {grid_variable_label(state.variable)}", "iso": ""},
+            labels={"total_value": f"Total {grid_variable_label(state.variable)}", group_col: ""},
         )
         fig.update_layout(height=620, margin=dict(l=10, r=10, t=20, b=10), yaxis={"categoryorder": "total ascending"})
         st.plotly_chart(fig, use_container_width=True)
     with right:
         st.dataframe(agg.round(4), use_container_width=True, hide_index=True)
+
+
+def grid_within_between_tab(df_all: pd.DataFrame, state: GridState) -> None:
+    st.subheader("Within and between country variation")
+    panel = df_all.dropna(subset=[state.variable]).copy()
+    if panel.empty:
+        st.warning("No data available for variation decomposition.")
+        return
+
+    country_stats = (
+        panel.groupby("iso", as_index=False)
+        .agg(country_mean=(state.variable, "mean"), within_sd=(state.variable, "std"), observations=("iso", "size"))
+        .fillna({"within_sd": 0})
+    )
+    total_sd = float(panel[state.variable].std())
+    between_sd = float(country_stats["country_mean"].std())
+    within_sd = float(country_stats["within_sd"].mean())
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total SD", f"{total_sd:,.4g}")
+    c2.metric("Between-country SD", f"{between_sd:,.4g}")
+    c3.metric("Average within-country SD", f"{within_sd:,.4g}")
+
+    left, right = st.columns([1, 1])
+    with left:
+        fig = px.bar(
+            pd.DataFrame(
+                {
+                    "component": ["Between countries", "Within countries"],
+                    "standard_deviation": [between_sd, within_sd],
+                }
+            ),
+            x="component",
+            y="standard_deviation",
+            color="component",
+            labels={"standard_deviation": "Standard deviation", "component": ""},
+        )
+        fig.update_layout(height=430, showlegend=False, margin=dict(l=10, r=10, t=20, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+    with right:
+        fig = px.scatter(
+            country_stats,
+            x="country_mean",
+            y="within_sd",
+            size="observations",
+            hover_name="iso",
+            labels={
+                "country_mean": f"Country mean: {grid_variable_label(state.variable)}",
+                "within_sd": "Within-country SD",
+            },
+        )
+        fig.update_layout(height=430, margin=dict(l=10, r=10, t=20, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.dataframe(country_stats.sort_values("country_mean", ascending=False).round(5), use_container_width=True, hide_index=True)
 
 
 def grid_trends_tab(df_all: pd.DataFrame, state: GridState) -> None:
@@ -1224,6 +1301,67 @@ def grid_trends_tab(df_all: pd.DataFrame, state: GridState) -> None:
         labels={"total_value": f"Country total: {grid_variable_label(state.variable)}"},
     )
     fig.update_layout(height=540, margin=dict(l=10, r=10, t=20, b=10), legend_title="")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def grid_regression_tab(df_year: pd.DataFrame, state: GridState) -> None:
+    st.subheader("Regression overview")
+    candidates = [
+        col
+        for col in ["pop_cell", "national_population", "GCP_sd_log_gdp", "longitude", "latitude", "is_cell_censored"]
+        if col in df_year.columns and col != state.variable
+    ]
+    if not candidates:
+        st.info("No numeric covariates are available for this selected variable.")
+        return
+
+    x_var = st.selectbox("Explanatory variable", candidates)
+    use_log_x = st.checkbox("Use log10(x)", value=x_var in {"pop_cell", "national_population"})
+    use_log_y = st.checkbox("Use log10(y)", value=state.use_log_color)
+    reg = df_year[[x_var, state.variable, "iso"]].dropna().copy()
+    reg = reg[(reg[x_var] > 0) if use_log_x else reg[x_var].notna()]
+    reg = reg[(reg[state.variable] > 0) if use_log_y else reg[state.variable].notna()]
+    if use_log_x:
+        reg[f"log10_{x_var}"] = np.log10(reg[x_var])
+        x_plot = f"log10_{x_var}"
+    else:
+        x_plot = x_var
+    if use_log_y:
+        reg[f"log10_{state.variable}"] = np.log10(reg[state.variable])
+        y_plot = f"log10_{state.variable}"
+    else:
+        y_plot = state.variable
+
+    reg = downsample_for_map(reg, 15000)
+    if len(reg) < 3:
+        st.warning("Not enough rows for a regression overview.")
+        return
+
+    x = reg[x_plot].to_numpy(dtype=float)
+    y = reg[y_plot].to_numpy(dtype=float)
+    X = np.column_stack([np.ones(len(x)), x])
+    intercept, slope = np.linalg.lstsq(X, y, rcond=None)[0]
+    y_hat = intercept + slope * x
+    ss_res = float(np.sum((y - y_hat) ** 2))
+    ss_tot = float(np.sum((y - y.mean()) ** 2))
+    r2 = 1 - ss_res / ss_tot if ss_tot else np.nan
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Slope", f"{slope:,.4g}")
+    c2.metric("Intercept", f"{intercept:,.4g}")
+    c3.metric("R squared", f"{r2:,.3f}")
+
+    fig = px.scatter(
+        reg,
+        x=x_plot,
+        y=y_plot,
+        color="iso",
+        hover_name="iso",
+        labels={x_plot: x_plot, y_plot: grid_variable_label(state.variable)},
+    )
+    xs = np.linspace(np.nanmin(x), np.nanmax(x), 100)
+    fig.add_trace(go.Scatter(x=xs, y=intercept + slope * xs, mode="lines", name="OLS fit", line=dict(color="#7f0000", width=3)))
+    fig.update_layout(height=560, margin=dict(l=10, r=10, t=20, b=10), showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -1283,14 +1421,28 @@ def grid_explorer_main() -> None:
         st.warning("No rows match the current grid filters.")
         return
 
-    tabs = st.tabs(["Map and overview", "Distribution", "Trends", "Uncertainty"])
+    tabs = st.tabs([
+        "Map and overview",
+        "Describe",
+        "Within-between",
+        "Trends",
+        "By group",
+        "Regression",
+        "Uncertainty",
+    ])
     with tabs[0]:
         grid_overview_tab(df_all, df_year, state)
     with tabs[1]:
         grid_distribution_tab(df_year, state)
     with tabs[2]:
-        grid_trends_tab(df_all, state)
+        grid_within_between_tab(df_all, state)
     with tabs[3]:
+        grid_trends_tab(df_all, state)
+    with tabs[4]:
+        grid_by_group_tab(df_year, state)
+    with tabs[5]:
+        grid_regression_tab(df_year, state)
+    with tabs[6]:
         grid_uncertainty_tab(df_year, state)
 
 
