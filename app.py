@@ -163,6 +163,29 @@ def page_config() -> None:
         .block-container {padding-top: 1.4rem; padding-bottom: 2.5rem;}
         [data-testid="stMetricValue"] {font-size: 1.35rem;}
         div[data-testid="stExpander"] div[role="button"] p {font-size: 0.95rem;}
+        [data-testid="stTabs"] div[role="tablist"] {
+            gap: 0.35rem;
+            overflow-x: auto;
+            overflow-y: hidden;
+            padding-bottom: 0.35rem;
+            scrollbar-width: thin;
+        }
+        [data-testid="stTabs"] button[role="tab"] {
+            min-width: max-content;
+            min-height: 2.85rem;
+            padding: 0.65rem 1rem 0.75rem 1rem;
+            border-radius: 7px 7px 0 0;
+            color: inherit;
+        }
+        [data-testid="stTabs"] button[role="tab"] p {
+            font-size: 0.98rem;
+            line-height: 1.25;
+            white-space: nowrap;
+            margin: 0;
+        }
+        [data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+            background: rgba(62, 177, 194, 0.16);
+        }
         .small-note {color: #5b6472; font-size: 0.92rem;}
         </style>
         """,
