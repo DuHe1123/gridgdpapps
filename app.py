@@ -423,6 +423,18 @@ def shapefile_feature_collection(resolution: str, df: pd.DataFrame, variable: st
     return {"type": "FeatureCollection", "features": features}
 
 
+def make_folium_colormap(vmin: float, vmax: float):
+    for name in ("Viridis_09", "viridis", "YlGnBu_09", "YlOrRd_09"):
+        candidate = getattr(linear, name, None)
+        if candidate is not None:
+            return candidate.scale(vmin, vmax)
+    return folium.LinearColormap(
+        colors=["#440154", "#31688e", "#35b779", "#fde725"],
+        vmin=vmin,
+        vmax=vmax,
+    )
+
+
 def render_folium_grid_map(df: pd.DataFrame, state: GridState) -> None:
     if folium is None or st_folium is None or linear is None:
         st.info("Interactive tile map packages are not installed yet, so a Plotly map is shown instead.")
@@ -446,7 +458,7 @@ def render_folium_grid_map(df: pd.DataFrame, state: GridState) -> None:
     if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
         vmin = float(map_df[color_col].min())
         vmax = float(map_df[color_col].max())
-    cmap = linear.Viridis_09.scale(vmin, vmax)
+    cmap = make_folium_colormap(vmin, vmax)
     cmap.caption = grid_variable_label(state.variable)
 
     if state.use_polygons:
